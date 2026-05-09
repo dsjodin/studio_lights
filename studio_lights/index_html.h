@@ -14,10 +14,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
     margin: 0; padding: 16px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #111; color: #eee;
-    max-width: 640px; margin-left: auto; margin-right: auto;
+    max-width: 1200px; margin-left: auto; margin-right: auto;
   }
   h1 { font-size: 1.4rem; margin: 0 0 16px; }
-  .master { display: flex; gap: 8px; margin-bottom: 16px; }
+  .master { display: flex; gap: 8px; margin-bottom: 24px; }
   .master button {
     flex: 1; padding: 16px; font-size: 1.1rem;
     border: 0; border-radius: 8px; cursor: pointer;
@@ -26,9 +26,20 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
   .master .on  { background: #2a7a2a; }
   .master .off { background: #7a2a2a; }
   .master button:active { transform: translateY(1px); }
+  .group { margin-bottom: 32px; }
+  .group h2 {
+    font-size: 0.8rem; font-weight: 600;
+    color: #888; margin: 0 0 10px;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .row-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
   .card {
     background: #1c1c1c; border: 1px solid #2a2a2a;
-    border-radius: 10px; padding: 14px; margin-bottom: 12px;
+    border-radius: 10px; padding: 14px;
   }
   .row {
     display: flex; align-items: center; justify-content: space-between;
@@ -58,10 +69,49 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
   .toggle.off { background: #444; }
   label.slider { display: block; margin: 10px 0; }
   label.slider .lab {
-    display: flex; justify-content: space-between;
+    display: flex; justify-content: space-between; align-items: center;
     font-size: 0.9rem; color: #bbb; margin-bottom: 4px;
   }
   input[type=range] { width: 100%; }
+  input[type=range].hue {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 18px;
+    border-radius: 9px;
+    outline: none;
+    background: linear-gradient(to right,
+      #ff0000  0%,
+      #ffff00 16.66%,
+      #00ff00 33.33%,
+      #00ffff 50%,
+      #0000ff 66.66%,
+      #ff00ff 83.33%,
+      #ff0000 100%);
+  }
+  input[type=range].hue::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #111;
+    box-shadow: 0 0 0 1px #555;
+    cursor: pointer;
+  }
+  input[type=range].hue::-moz-range-thumb {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #111;
+    box-shadow: 0 0 0 1px #555;
+    cursor: pointer;
+  }
+  .swatch {
+    display: inline-block;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    border: 1px solid #333;
+    vertical-align: middle;
+  }
   .modes { display: flex; gap: 6px; margin: 8px 0; }
   .modes button {
     flex: 1; padding: 6px; border: 0; border-radius: 5px;
@@ -79,6 +129,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
   }
   .cfg input { width: 50px; }
   .status { font-size: 0.8rem; color: #888; text-align: center; margin-top: 8px; }
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .row-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -101,6 +155,7 @@ function el(tag, attrs, children) {
   const e = document.createElement(tag);
   for (const k in (attrs||{})) {
     if (k === 'class') e.className = attrs[k];
+    else if (k === 'style') e.setAttribute('style', attrs[k]);
     else if (k.startsWith('on')) e[k] = attrs[k];
     else e.setAttribute(k, attrs[k]);
   }
@@ -117,134 +172,162 @@ function kRange(kind) {
 function chRange(kind) {
   return kind === 'a7105' ? [1, 15] : [1, 19];
 }
+function swatchStyle(h, s) {
+  return 'background: hsl(' + h + ', ' + (s == null ? 100 : s) + '%, 50%)';
+}
+
+function makeCard(L) {
+  const card = el('div', {class: 'card'});
+
+  const nameIn = el('input', {
+    class: 'name', type: 'text', value: L.name, maxlength: 31,
+    'aria-label': 'Light name'
+  });
+  nameIn.onchange = () => {
+    const v = nameIn.value.trim();
+    if (v && v !== L.name) setLight(L.id, {name: v});
+    else nameIn.value = L.name;
+  };
+  nameIn.onkeydown = (e) => { if (e.key === 'Enter') nameIn.blur(); };
+
+  const badge = el('span', {class: 'badge ' + L.kind},
+                   [L.kind === 'a7105' ? '288 RF' : 'RB9 BLE']);
+
+  const head = el('div', {class: 'row'}, [
+    nameIn,
+    badge,
+    el('button', {
+      class: 'toggle ' + (L.power ? 'on' : 'off'),
+      onclick: () => setLight(L.id, {power: L.power ? 0 : 1})
+    }, [L.power ? 'ON' : 'OFF'])
+  ]);
+  card.appendChild(head);
+
+  if (L.kind === 'weeylite') {
+    const modes = el('div', {class: 'modes'}, [
+      el('button', {
+        class: L.mode === 'cct' ? 'active' : '',
+        onclick: () => setLight(L.id, {mode: 'cct'})
+      }, ['CCT']),
+      el('button', {
+        class: L.mode === 'hsi' ? 'active' : '',
+        onclick: () => setLight(L.id, {mode: 'hsi'})
+      }, ['HSI'])
+    ]);
+    card.appendChild(modes);
+  }
+
+  const briLab = el('div', {class: 'lab'}, [
+    el('span', {}, ['Brightness']),
+    el('span', {id: 'bri-v-' + L.id}, [L.brightness + '%'])
+  ]);
+  const briIn = el('input', {
+    type: 'range', min: 0, max: 100, step: 1, value: L.brightness
+  });
+  briIn.oninput = () => {
+    document.getElementById('bri-v-' + L.id).textContent = briIn.value + '%';
+  };
+  briIn.onchange = () => setLight(L.id, {bri: parseInt(briIn.value)});
+  card.appendChild(el('label', {class: 'slider'}, [briLab, briIn]));
+
+  const showCct = L.kind === 'a7105' || L.mode === 'cct';
+  const showHsi = L.kind === 'weeylite' && L.mode === 'hsi';
+
+  if (showCct) {
+    const [kMin, kMax] = kRange(L.kind);
+    const kLab = el('div', {class: 'lab'}, [
+      el('span', {}, ['Kelvin']),
+      el('span', {id: 'k-v-' + L.id}, [L.kelvin + 'K'])
+    ]);
+    const kIn = el('input', {
+      type: 'range', min: kMin, max: kMax, step: 100, value: L.kelvin
+    });
+    kIn.oninput = () => {
+      document.getElementById('k-v-' + L.id).textContent = kIn.value + 'K';
+    };
+    kIn.onchange = () => setLight(L.id, {k: parseInt(kIn.value)});
+    card.appendChild(el('label', {class: 'slider'}, [kLab, kIn]));
+  }
+
+  if (showHsi) {
+    const hSwatch = el('span', {
+      class: 'swatch', id: 'h-sw-' + L.id,
+      style: swatchStyle(L.hue, L.saturation)
+    });
+    const hLab = el('div', {class: 'lab'}, [
+      el('span', {}, ['Hue']),
+      hSwatch
+    ]);
+    const hIn = el('input', {
+      class: 'hue',
+      type: 'range', min: 0, max: 360, step: 1, value: L.hue
+    });
+    hIn.oninput = () => {
+      const sIn2 = document.getElementById('s-in-' + L.id);
+      const sat  = sIn2 ? sIn2.value : L.saturation;
+      hSwatch.setAttribute('style', swatchStyle(hIn.value, sat));
+    };
+    hIn.onchange = () => setLight(L.id, {hue: parseInt(hIn.value)});
+    card.appendChild(el('label', {class: 'slider'}, [hLab, hIn]));
+
+    const sLab = el('div', {class: 'lab'}, [
+      el('span', {}, ['Saturation']),
+      el('span', {id: 's-v-' + L.id}, [L.saturation + '%'])
+    ]);
+    const sIn = el('input', {
+      id: 's-in-' + L.id,
+      type: 'range', min: 0, max: 100, step: 1, value: L.saturation
+    });
+    sIn.oninput = () => {
+      document.getElementById('s-v-' + L.id).textContent = sIn.value + '%';
+      const hIn2 = card.querySelector('input.hue');
+      const hue  = hIn2 ? hIn2.value : L.hue;
+      hSwatch.setAttribute('style', swatchStyle(hue, sIn.value));
+    };
+    sIn.onchange = () => setLight(L.id, {sat: parseInt(sIn.value)});
+    card.appendChild(el('label', {class: 'slider'}, [sLab, sIn]));
+  }
+
+  const [chMin, chMax] = chRange(L.kind);
+  const chIn = el('input', {type: 'number', min: chMin, max: chMax, value: L.channel});
+  chIn.onchange = () => setLight(L.id, {channel: parseInt(chIn.value)});
+
+  const grpSel = el('select', {});
+  const grpOpts = L.kind === 'a7105'
+    ? [['A', 0], ['B', 1]]
+    : [['ALL', 0], ['1', 1], ['2', 2], ['3', 3], ['4', 4], ['5', 5], ['6', 6]];
+  grpOpts.forEach(([label, val]) => {
+    const o = el('option', {value: val}, [label]);
+    if (val === L.group) o.selected = true;
+    grpSel.appendChild(o);
+  });
+  grpSel.onchange = () => setLight(L.id, {group: parseInt(grpSel.value)});
+
+  const cfg = el('div', {class: 'cfg'}, [
+    el('label', {}, ['Ch', chIn]),
+    el('label', {}, ['Grp', grpSel])
+  ]);
+  card.appendChild(cfg);
+
+  return card;
+}
+
+function makeGroup(title, lights) {
+  const grid = el('div', {class: 'row-grid'});
+  lights.forEach(L => grid.appendChild(makeCard(L)));
+  return el('section', {class: 'group'}, [
+    el('h2', {}, [title]),
+    grid
+  ]);
+}
 
 function render() {
   const root = document.getElementById('lights');
   root.innerHTML = '';
-  state.lights.forEach(L => {
-    const card = el('div', {class: 'card'});
-
-    const nameIn = el('input', {
-      class: 'name', type: 'text', value: L.name, maxlength: 31,
-      'aria-label': 'Light name'
-    });
-    nameIn.onchange = () => {
-      const v = nameIn.value.trim();
-      if (v && v !== L.name) setLight(L.id, {name: v});
-      else nameIn.value = L.name;
-    };
-    nameIn.onkeydown = (e) => { if (e.key === 'Enter') nameIn.blur(); };
-
-    const badge = el('span', {class: 'badge ' + L.kind},
-                     [L.kind === 'a7105' ? '288 RF' : 'RB9 BLE']);
-
-    const head = el('div', {class: 'row'}, [
-      nameIn,
-      badge,
-      el('button', {
-        class: 'toggle ' + (L.power ? 'on' : 'off'),
-        onclick: () => setLight(L.id, {power: L.power ? 0 : 1})
-      }, [L.power ? 'ON' : 'OFF'])
-    ]);
-    card.appendChild(head);
-
-    if (L.kind === 'weeylite') {
-      const modes = el('div', {class: 'modes'}, [
-        el('button', {
-          class: L.mode === 'cct' ? 'active' : '',
-          onclick: () => setLight(L.id, {mode: 'cct'})
-        }, ['CCT']),
-        el('button', {
-          class: L.mode === 'hsi' ? 'active' : '',
-          onclick: () => setLight(L.id, {mode: 'hsi'})
-        }, ['HSI'])
-      ]);
-      card.appendChild(modes);
-    }
-
-    const briLab = el('div', {class: 'lab'}, [
-      el('span', {}, ['Brightness']),
-      el('span', {id: 'bri-v-' + L.id}, [L.brightness + '%'])
-    ]);
-    const briIn = el('input', {
-      type: 'range', min: 0, max: 100, step: 1, value: L.brightness
-    });
-    briIn.oninput = () => {
-      document.getElementById('bri-v-' + L.id).textContent = briIn.value + '%';
-    };
-    briIn.onchange = () => setLight(L.id, {bri: parseInt(briIn.value)});
-    card.appendChild(el('label', {class: 'slider'}, [briLab, briIn]));
-
-    const showCct = L.kind === 'a7105' || L.mode === 'cct';
-    const showHsi = L.kind === 'weeylite' && L.mode === 'hsi';
-
-    if (showCct) {
-      const [kMin, kMax] = kRange(L.kind);
-      const kLab = el('div', {class: 'lab'}, [
-        el('span', {}, ['Kelvin']),
-        el('span', {id: 'k-v-' + L.id}, [L.kelvin + 'K'])
-      ]);
-      const kIn = el('input', {
-        type: 'range', min: kMin, max: kMax, step: 100, value: L.kelvin
-      });
-      kIn.oninput = () => {
-        document.getElementById('k-v-' + L.id).textContent = kIn.value + 'K';
-      };
-      kIn.onchange = () => setLight(L.id, {k: parseInt(kIn.value)});
-      card.appendChild(el('label', {class: 'slider'}, [kLab, kIn]));
-    }
-
-    if (showHsi) {
-      const hLab = el('div', {class: 'lab'}, [
-        el('span', {}, ['Hue']),
-        el('span', {id: 'h-v-' + L.id}, [L.hue + 'deg'])
-      ]);
-      const hIn = el('input', {
-        type: 'range', min: 0, max: 360, step: 1, value: L.hue
-      });
-      hIn.oninput = () => {
-        document.getElementById('h-v-' + L.id).textContent = hIn.value + 'deg';
-      };
-      hIn.onchange = () => setLight(L.id, {hue: parseInt(hIn.value)});
-      card.appendChild(el('label', {class: 'slider'}, [hLab, hIn]));
-
-      const sLab = el('div', {class: 'lab'}, [
-        el('span', {}, ['Saturation']),
-        el('span', {id: 's-v-' + L.id}, [L.saturation + '%'])
-      ]);
-      const sIn = el('input', {
-        type: 'range', min: 0, max: 100, step: 1, value: L.saturation
-      });
-      sIn.oninput = () => {
-        document.getElementById('s-v-' + L.id).textContent = sIn.value + '%';
-      };
-      sIn.onchange = () => setLight(L.id, {sat: parseInt(sIn.value)});
-      card.appendChild(el('label', {class: 'slider'}, [sLab, sIn]));
-    }
-
-    const [chMin, chMax] = chRange(L.kind);
-    const chIn = el('input', {type: 'number', min: chMin, max: chMax, value: L.channel});
-    chIn.onchange = () => setLight(L.id, {channel: parseInt(chIn.value)});
-
-    const grpSel = el('select', {});
-    const grpOpts = L.kind === 'a7105'
-      ? [['A', 0], ['B', 1]]
-      : [['ALL', 0], ['1', 1], ['2', 2], ['3', 3], ['4', 4], ['5', 5], ['6', 6]];
-    grpOpts.forEach(([label, val]) => {
-      const o = el('option', {value: val}, [label]);
-      if (val === L.group) o.selected = true;
-      grpSel.appendChild(o);
-    });
-    grpSel.onchange = () => setLight(L.id, {group: parseInt(grpSel.value)});
-
-    const cfg = el('div', {class: 'cfg'}, [
-      el('label', {}, ['Ch', chIn]),
-      el('label', {}, ['Grp', grpSel])
-    ]);
-    card.appendChild(cfg);
-
-    root.appendChild(card);
-  });
+  const a7105 = state.lights.filter(L => L.kind === 'a7105');
+  const weey  = state.lights.filter(L => L.kind === 'weeylite');
+  if (a7105.length) root.appendChild(makeGroup('288ARC',        a7105));
+  if (weey.length)  root.appendChild(makeGroup('Weeylite RB9',  weey));
 }
 
 function setStatus(s) {

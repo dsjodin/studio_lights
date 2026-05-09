@@ -281,7 +281,8 @@ static void handle_set_light() {
         String m = server.arg("mode");
         if      (m == "cct") L.mode = MODE_CCT;
         else if (m == "hsi") L.mode = MODE_HSI;
-        state_changed  = true;
+        // mode toggle alone does not trigger a packet - the next bri/k/hue/sat
+        // change will TX with the new mode. Keeps the UI snappy.
         config_changed = true;
     }
     if (server.hasArg("channel")) {
