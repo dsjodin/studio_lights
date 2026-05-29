@@ -334,14 +334,16 @@ void setup() {
     prefs.begin("lights", false);
     load_lights();
 
+    // A7105 is an external SPI chip - no impact on WiFi/BLE.
     radio_ok = radio.begin();
     Serial.printf("[radio] A7105  init %s\n",
                   radio_ok ? "OK" : "FAILED (check wiring)");
 
-    ble_ok = Weeylite::begin();
-    Serial.printf("[ble]   NimBLE init %s\n",
-                  ble_ok ? "OK" : "FAILED");
-
+    // Bring up WiFi BEFORE NimBLE. On ESP32-C3 the BLE controller and
+    // the WiFi STA share a single 2.4 GHz radio; initializing BLE first
+    // has been observed to keep STA from associating on some networks.
+    // WiFi-first lets the controller's coexistence scheduler see WiFi
+    // already in STA state when BLE comes up.
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(WIFI_HOSTNAME);
     WiFi.setSleep(false);
@@ -365,6 +367,10 @@ void setup() {
         Serial.println("[wifi] connect FAILED - will keep retrying in background");
         WiFi.setAutoReconnect(true);
     }
+
+    ble_ok = Weeylite::begin();
+    Serial.printf("[ble]   NimBLE init %s\n",
+                  ble_ok ? "OK" : "FAILED");
 
     server.on("/", HTTP_GET, handle_root);
     server.on("/api/state", HTTP_GET,  handle_state);
