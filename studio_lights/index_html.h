@@ -72,7 +72,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
     display: flex; justify-content: space-between; align-items: center;
     font-size: 0.9rem; color: #bbb; margin-bottom: 4px;
   }
-  input[type=range] { width: 100%; }
+  input[type=range] { width: 100%; touch-action: none; }
   input[type=range].hue {
     -webkit-appearance: none;
     appearance: none;
@@ -149,7 +149,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 
 <script>
 let state = { lights: [] };
-let pending = false;
+let masterPending = false;
+const lightInFlight = {};
+const lightQueued   = {};
+let activeSlider = null;
+let renderQueued = false;
+
+// Cap how fast we fire oninput-driven sends during a drag.
+const SLIDER_THROTTLE_MS = 80;
+let lastLiveSend = 0;
 
 function el(tag, attrs, children) {
   const e = document.createElement(tag);
@@ -166,14 +174,33 @@ function el(tag, attrs, children) {
   return e;
 }
 
-function kRange(kind) {
-  return kind === 'a7105' ? [3200, 5600] : [2800, 8500];
-}
-function chRange(kind) {
-  return kind === 'a7105' ? [1, 15] : [1, 19];
-}
+function kRange(kind)  { return kind === 'a7105' ? [3200, 5600] : [2800, 8500]; }
+function chRange(kind) { return kind === 'a7105' ? [1, 15] : [1, 19]; }
 function swatchStyle(h, s) {
   return 'background: hsl(' + h + ', ' + (s == null ? 100 : s) + '%, 50%)';
+}
+// Only the Weeylite TX is non-blocking on the server, so only those
+// sliders fire live on input. A7105 sends would otherwise pile up behind
+// the synchronous 400 ms radio burst.
+function liveCapable(L) { return L.kind === 'weeylite'; }
+
+function trackDrag(input) {
+  const stop = () => {
+    if (activeSlider === input) { activeSlider = null; drainRender(); }
+  };
+  input.addEventListener('pointerdown',       () => { activeSlider = input; });
+  input.addEventListener('pointerup',         stop);
+  input.addEventListener('pointercancel',     stop);
+  input.addEventListener('lostpointercapture', stop);
+  input.addEventListener('touchstart', () => { activeSlider = input; }, {passive: true});
+  input.addEventListener('touchend',   stop, {passive: true});
+}
+
+function liveSend(id, opts) {
+  const now = Date.now();
+  if (now - lastLiveSend < SLIDER_THROTTLE_MS) return;
+  lastLiveSend = now;
+  setLight(id, opts);
 }
 
 function makeCard(L) {
@@ -226,8 +253,10 @@ function makeCard(L) {
   });
   briIn.oninput = () => {
     document.getElementById('bri-v-' + L.id).textContent = briIn.value + '%';
+    if (liveCapable(L)) liveSend(L.id, {bri: parseInt(briIn.value)});
   };
   briIn.onchange = () => setLight(L.id, {bri: parseInt(briIn.value)});
+  trackDrag(briIn);
   card.appendChild(el('label', {class: 'slider'}, [briLab, briIn]));
 
   const showCct = L.kind === 'a7105' || L.mode === 'cct';
@@ -244,8 +273,10 @@ function makeCard(L) {
     });
     kIn.oninput = () => {
       document.getElementById('k-v-' + L.id).textContent = kIn.value + 'K';
+      if (liveCapable(L)) liveSend(L.id, {k: parseInt(kIn.value)});
     };
     kIn.onchange = () => setLight(L.id, {k: parseInt(kIn.value)});
+    trackDrag(kIn);
     card.appendChild(el('label', {class: 'slider'}, [kLab, kIn]));
   }
 
@@ -266,8 +297,10 @@ function makeCard(L) {
       const sIn2 = document.getElementById('s-in-' + L.id);
       const sat  = sIn2 ? sIn2.value : L.saturation;
       hSwatch.setAttribute('style', swatchStyle(hIn.value, sat));
+      liveSend(L.id, {hue: parseInt(hIn.value)});
     };
     hIn.onchange = () => setLight(L.id, {hue: parseInt(hIn.value)});
+    trackDrag(hIn);
     card.appendChild(el('label', {class: 'slider'}, [hLab, hIn]));
 
     const sLab = el('div', {class: 'lab'}, [
@@ -283,8 +316,10 @@ function makeCard(L) {
       const hIn2 = card.querySelector('input.hue');
       const hue  = hIn2 ? hIn2.value : L.hue;
       hSwatch.setAttribute('style', swatchStyle(hue, sIn.value));
+      liveSend(L.id, {sat: parseInt(sIn.value)});
     };
     sIn.onchange = () => setLight(L.id, {sat: parseInt(sIn.value)});
+    trackDrag(sIn);
     card.appendChild(el('label', {class: 'slider'}, [sLab, sIn]));
   }
 
@@ -330,8 +365,68 @@ function render() {
   if (weey.length)  root.appendChild(makeGroup('Weeylite RB9',  weey));
 }
 
+// Rebuilding the DOM while the user is dragging a slider would tear the
+// pointer-captured element out from under them. Defer renders until the
+// drag releases.
+function maybeRender() {
+  if (activeSlider) { renderQueued = true; return; }
+  render();
+}
+function drainRender() {
+  if (renderQueued) { renderQueued = false; render(); }
+}
+
 function setStatus(s) {
+  if (activeSlider) return;
   document.getElementById('status').textContent = s;
+}
+
+function setLight(id, opts) {
+  lightQueued[id] = Object.assign(lightQueued[id] || {}, opts);
+  flushLight(id);
+}
+
+async function flushLight(id) {
+  if (lightInFlight[id] || !lightQueued[id]) return;
+  const params = lightQueued[id];
+  lightQueued[id]   = null;
+  lightInFlight[id] = true;
+  setStatus('sending...');
+  try {
+    const r = await fetch('/api/light', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(Object.assign({id: id}, params))
+    });
+    state = await r.json();
+    maybeRender();
+    setStatus('ok');
+  } catch (e) {
+    setStatus('error');
+  } finally {
+    lightInFlight[id] = false;
+    if (lightQueued[id]) flushLight(id);
+  }
+}
+
+async function powerAll(on) {
+  if (masterPending) return;
+  masterPending = true;
+  setStatus('sending...');
+  try {
+    const r = await fetch('/api/power', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({on: on})
+    });
+    state = await r.json();
+    maybeRender();
+    setStatus('ok');
+  } catch (e) {
+    setStatus('error');
+  } finally {
+    masterPending = false;
+  }
 }
 
 async function refresh() {
@@ -345,35 +440,6 @@ async function refresh() {
   } catch (e) {
     setStatus('offline');
   }
-}
-
-async function call(url, params) {
-  if (pending) return;
-  pending = true;
-  setStatus('sending...');
-  const body = new URLSearchParams(params).toString();
-  try {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body
-    });
-    state = await r.json();
-    render();
-    setStatus('ok');
-  } catch (e) {
-    setStatus('error');
-  } finally {
-    pending = false;
-  }
-}
-
-function powerAll(on) {
-  call('/api/power', {on});
-}
-
-function setLight(id, opts) {
-  call('/api/light', Object.assign({id}, opts));
 }
 
 refresh();

@@ -5,12 +5,14 @@
 namespace Weeylite {
 
 static NimBLEAdvertising* adv = nullptr;
-static uint8_t packet_id = 0;
+static uint8_t  packet_id   = 0;
+static uint32_t adv_stop_at = 0;
 
-// How long we keep the iBeacon advertising live per command. The lights
-// check the rolling packet ID byte, so a single transmission is enough
-// to be picked up; ~250 ms covers about 2-3 advertising intervals.
-static const uint32_t TX_DURATION_MS = 250;
+// Hold time after each command. With a 100 ms advertising interval this
+// gives the light ~2 broadcasts to receive the new payload. tick() turns
+// the radio off when this window elapses, so HTTP handlers return
+// immediately instead of blocking on a delay().
+static const uint32_t TX_HOLD_MS = 200;
 
 static uint8_t next_id() {
     packet_id = (uint8_t)((packet_id + 1) % 223);
@@ -62,13 +64,6 @@ static void build_uuid(uint8_t out[16], uint8_t channel, uint8_t group,
 static void transmit(const uint8_t uuid[16]) {
     if (!adv) return;
 
-    // BLE manufacturer-specific data layout for an Apple iBeacon:
-    //   company id LE: 4C 00
-    //   iBeacon prefix: 02 15
-    //   UUID (16): command payload
-    //   major BE: 00 0A (10)
-    //   minor BE: 00 6E (110)
-    //   tx power: C5 (-59 dBm)
     std::string mfg;
     mfg.reserve(25);
     mfg += (char)0x4C; mfg += (char)0x00;
@@ -79,23 +74,20 @@ static void transmit(const uint8_t uuid[16]) {
     mfg += (char)0xC5;
 
     NimBLEAdvertisementData data;
-    data.setFlags(0x04); // BR/EDR not supported
+    data.setFlags(0x04);
     data.setManufacturerData(mfg);
 
     adv->stop();
     adv->setAdvertisementData(data);
     adv->start();
-    delay(TX_DURATION_MS);
-    adv->stop();
+    adv_stop_at = millis() + TX_HOLD_MS;
 }
 
 bool begin() {
     NimBLEDevice::init("");
     adv = NimBLEDevice::getAdvertising();
     if (!adv) return false;
-    // 100 ms advertising interval, matching the Android app's LOW_LATENCY
-    // mode. Units are 0.625 ms, so 0xA0 = 160 = 100 ms.
-    adv->setMinInterval(0xA0);
+    adv->setMinInterval(0xA0); // 100 ms (0.625 ms units)
     adv->setMaxInterval(0xA0);
     return true;
 }
@@ -104,6 +96,14 @@ void end() {
     if (adv) adv->stop();
     NimBLEDevice::deinit(true);
     adv = nullptr;
+    adv_stop_at = 0;
+}
+
+void tick() {
+    if (adv_stop_at && (int32_t)(millis() - adv_stop_at) >= 0) {
+        if (adv) adv->stop();
+        adv_stop_at = 0;
+    }
 }
 
 void power_on(uint8_t channel) {

@@ -11,6 +11,10 @@ namespace Weeylite {
 bool begin();
 void end();
 
+// Call from loop(). Turns advertising off once the post-command hold
+// window elapses, so the HTTP handler can fire-and-forget.
+void tick();
+
 void power_on (uint8_t channel);
 void power_off(uint8_t channel);
 void set_cct  (uint8_t channel, uint8_t group, uint16_t kelvin, uint8_t brightness);
