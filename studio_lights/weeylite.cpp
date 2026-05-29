@@ -1,18 +1,28 @@
 #include "weeylite.h"
 #include <NimBLEDevice.h>
 #include <math.h>
+#include <string.h>
 
 namespace Weeylite {
 
 static NimBLEAdvertising* adv = nullptr;
-static uint8_t  packet_id   = 0;
-static uint32_t adv_stop_at = 0;
+static uint8_t packet_id = 0;
 
-// Hold time after each command. With a 100 ms advertising interval this
-// gives the light ~2 broadcasts to receive the new payload. tick() turns
-// the radio off when this window elapses, so HTTP handlers return
-// immediately instead of blocking on a delay().
+// Each queued command gets its own 200 ms broadcast window. With a 100 ms
+// advertising interval the light receives ~2 packets, which is what the
+// Android app effectively does.
 static const uint32_t TX_HOLD_MS = 200;
+
+// FIFO of pending commands. If it overflows (rapid slider drag) we drop
+// the oldest entry - intermediate values do not matter, the latest does.
+// Power commands fit comfortably; only sliders can fill this up.
+static const int QUEUE_SIZE = 8;
+struct Cmd { uint8_t uuid[16]; };
+static Cmd      cmd_q[QUEUE_SIZE];
+static int      q_head = 0;
+static int      q_tail = 0;
+static bool     adv_active = false;
+static uint32_t adv_until  = 0;
 
 static uint8_t next_id() {
     packet_id = (uint8_t)((packet_id + 1) % 223);
@@ -61,14 +71,28 @@ static void build_uuid(uint8_t out[16], uint8_t channel, uint8_t group,
     out[15] = 0x00;
 }
 
-static void transmit(const uint8_t uuid[16]) {
+static void enqueue(const uint8_t uuid[16]) {
+    int next = (q_tail + 1) % QUEUE_SIZE;
+    if (next == q_head) {
+        // Full - drop oldest.
+        q_head = (q_head + 1) % QUEUE_SIZE;
+    }
+    memcpy(cmd_q[q_tail].uuid, uuid, 16);
+    q_tail = next;
+}
+
+static void start_next() {
+    if (q_head == q_tail) return;
     if (!adv) return;
+
+    const Cmd& c = cmd_q[q_head];
+    q_head = (q_head + 1) % QUEUE_SIZE;
 
     std::string mfg;
     mfg.reserve(25);
     mfg += (char)0x4C; mfg += (char)0x00;
     mfg += (char)0x02; mfg += (char)0x15;
-    mfg.append((const char*)uuid, 16);
+    mfg.append((const char*)c.uuid, 16);
     mfg += (char)0x00; mfg += (char)0x0A;
     mfg += (char)0x00; mfg += (char)0x6E;
     mfg += (char)0xC5;
@@ -77,17 +101,23 @@ static void transmit(const uint8_t uuid[16]) {
     data.setFlags(0x04);
     data.setManufacturerData(mfg);
 
-    adv->stop();
     adv->setAdvertisementData(data);
     adv->start();
-    adv_stop_at = millis() + TX_HOLD_MS;
+    adv_until  = millis() + TX_HOLD_MS;
+    adv_active = true;
+}
+
+static void transmit(const uint8_t uuid[16]) {
+    if (!adv) return;
+    enqueue(uuid);
+    if (!adv_active) start_next();
 }
 
 bool begin() {
     NimBLEDevice::init("");
     adv = NimBLEDevice::getAdvertising();
     if (!adv) return false;
-    adv->setMinInterval(0xA0); // 100 ms (0.625 ms units)
+    adv->setMinInterval(0xA0); // 100 ms
     adv->setMaxInterval(0xA0);
     return true;
 }
@@ -96,13 +126,20 @@ void end() {
     if (adv) adv->stop();
     NimBLEDevice::deinit(true);
     adv = nullptr;
-    adv_stop_at = 0;
+    adv_active = false;
+    adv_until = 0;
+    q_head = q_tail = 0;
 }
 
 void tick() {
-    if (adv_stop_at && (int32_t)(millis() - adv_stop_at) >= 0) {
-        if (adv) adv->stop();
-        adv_stop_at = 0;
+    if (!adv) return;
+    if (adv_active && (int32_t)(millis() - adv_until) >= 0) {
+        adv->stop();
+        adv_active = false;
+        // Drain the next queued command immediately so back-to-back
+        // commands (e.g. master power over 2 lights) each get their
+        // full broadcast window without overlap.
+        start_next();
     }
 }
 
