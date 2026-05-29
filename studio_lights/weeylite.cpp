@@ -8,14 +8,11 @@ namespace Weeylite {
 static NimBLEAdvertising* adv = nullptr;
 static uint8_t packet_id = 0;
 
-// Each queued command gets its own 200 ms broadcast window. With a 100 ms
-// advertising interval the light receives ~2 packets, which is what the
-// Android app effectively does.
-static const uint32_t TX_HOLD_MS = 200;
+// Per-command broadcast window. Long enough to survive WiFi/BLE coex jitter
+// on the C3's shared radio - at 100 ms adv interval this gives the light
+// ~4-5 packets to catch.
+static const uint32_t TX_HOLD_MS = 500;
 
-// FIFO of pending commands. If it overflows (rapid slider drag) we drop
-// the oldest entry - intermediate values do not matter, the latest does.
-// Power commands fit comfortably; only sliders can fill this up.
 static const int QUEUE_SIZE = 8;
 struct Cmd { uint8_t uuid[16]; };
 static Cmd      cmd_q[QUEUE_SIZE];
@@ -74,7 +71,6 @@ static void build_uuid(uint8_t out[16], uint8_t channel, uint8_t group,
 static void enqueue(const uint8_t uuid[16]) {
     int next = (q_tail + 1) % QUEUE_SIZE;
     if (next == q_head) {
-        // Full - drop oldest.
         q_head = (q_head + 1) % QUEUE_SIZE;
     }
     memcpy(cmd_q[q_tail].uuid, uuid, 16);
@@ -101,10 +97,20 @@ static void start_next() {
     data.setFlags(0x04);
     data.setManufacturerData(mfg);
 
+    // Force NimBLE into a known-stopped state before updating the payload.
+    // setAdvertisementData() silently no-ops if the controller still thinks
+    // adv is active, which would leave the previous command on the air.
+    adv->stop();
     adv->setAdvertisementData(data);
     adv->start();
     adv_until  = millis() + TX_HOLD_MS;
     adv_active = true;
+
+    Serial.printf("[ble] tx mode=%u ch=%u grp=%u id=%u\n",
+                  c.uuid[2],
+                  (unsigned)(c.uuid[1] >> 3),
+                  (unsigned)(c.uuid[1] & 0x07),
+                  c.uuid[14]);
 }
 
 static void transmit(const uint8_t uuid[16]) {
@@ -136,9 +142,6 @@ void tick() {
     if (adv_active && (int32_t)(millis() - adv_until) >= 0) {
         adv->stop();
         adv_active = false;
-        // Drain the next queued command immediately so back-to-back
-        // commands (e.g. master power over 2 lights) each get their
-        // full broadcast window without overlap.
         start_next();
     }
 }
